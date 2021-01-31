@@ -14,13 +14,17 @@ from typing import List, Tuple
 
 @dataclass
 class Asset:
-    category: str
-    ticker: str
     price: float
     units: int
     date: Arrow
-    fmv: Optional[float] = None
+    fmv: Optional[int] = None
 
+@dataclass
+class Lifecycle: 
+    ticker: str
+    option: Asset
+    stock: Optional[Asset] = None
+    sold: Optional[bool] = None
 
 @dataclass
 class Event:
@@ -32,131 +36,18 @@ class Event:
 
 
 class Portfolio:
-    def __init__(self, region: str, filing_status: str):
+    def __init__(self, region: str, filing_status: str, initial_cash: Optional[float] = None):
+        self.cash = initial_cash
         self.region = region
         self.filing_status = filing_status
+        self._events = []
+        self.fifo = []
+        self.lifo = []
         
-        with NamedTemporaryFile('wb+', delete=False) as f:
-            self.c = sqlite3.connect(f.name)
-            
-        self.c.execute("""
-            CREATE TABLE ASSETS (
-                _ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                CATEGORY TEXT NOT NULL,
-                TICKER TEXT NOT NULL,
-                PRICE FLOAT NOT NULL,
-                UNITS INTEGER NOT NULL,
-                DATE DATETIME NOT NULL,
-                FMV FLOAT
-            )
-        """)
-        self.c.execute("""
-            CREATE TABLE EVENTS (
-                _ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                ACTION TEXT NOT NULL,
-                TICKER TEXT NOT NULL,
-                PRICE FLOAT NOT NULL,
-                UNITS INTEGER NOT NULL,
-                DATE DATETIME NOT NULL
-            )
-        """)
-
-    @property
-    def assets(self):
-        return self.query('assets')
-                       
     @property
     def events(self):
-        return self.query('events')
-                       
-    def query(self, table: str, order_by: Optional[str]="date", **filters):
-        where_args = [f"{k.upper()} = '{v}'" for k, v in filters.items()]
-        sep = "\n AND "
-        filters_formatted = f"WHERE {sep.join(where_args)}"
-        q = f"""
-            SELECT * FROM {table.upper()}
-            {filters_formatted if filters else ''}
-            {f'ORDER BY {order_by.upper()}'}
-        """
-        df = pd.read_sql(q, self.c, index_col="_ID", parse_dates=["DATE"])
-        df.columns = [c.lower() for c in df.columns]
-        
-        return df
-               
-    def _remove_assets(self, ids: list):
-        q = f"""
-        DELETE FROM ASSETS
-        WHERE _ID IN ({', '.join([str(i) for i in ids])})
-        """
-        self.c.execute(q)
-        
-        return self.assets
-                       
-    def _upsert_asset(self, asset: Asset, _id: Optional[int] = None):
-        """Inserts an asset into the database, optionally replacing the 
-        one that exists at the index, then sorts by date.
-        :param asset: The asset to insert
-        :param index: The index of the asset to replace
-        """
-        if _id:
-            q = f"""
-            UPDATE ASSETS
-                SET CATEGORY = '{asset.category}',
-                TICKER = '{asset.ticker}',
-                PRICE = {asset.price},
-                UNITS = {asset.units},
-                DATE = '{asset.date.isoformat()}',
-                FMV = {asset.fmv or 'null'}
-                WHERE _ID = {_id}
-            """
-        else:
-            sep = ', '
-            q = f"""
-            INSERT INTO ASSETS ({', '.join(asdict(asset).keys())})
-            VALUES (
-                '{asset.category}',
-                '{asset.ticker}',
-                {asset.price},
-                {asset.units},
-                '{asset.date.isoformat()}',
-                {asset.fmv or 'null'}
-            )
-            """
-        self.c.execute(q)
-        
-        return self.assets
-        
-    def _upsert_event(self, event: Event, _id: Optional[int] = None):
-        """Inserts an asset into the database, optionally replacing the 
-        one that exists at the index, then sorts by date.
-        :param asset: The asset to insert
-        :param index: The index of the asset to replace
-        """
-        if _id:
-            q = f"""
-            UPDATE EVENTS
-                SET ACTION = '{event.action}',
-                TICKER = '{event.ticker}',
-                PRICE = {event.price},
-                UNITS = {event.units},
-                DATE = '{event.date.isoformat()}',
-                WHERE _ID = {_id}
-            """
-        else:
-            q = f"""
-            INSERT INTO EVENTS ({', '.join(asdict(event).keys())})
-            VALUES (
-                '{event.action}',
-                '{event.ticker}',
-                {event.price},
-                {event.units},
-                '{event.date.isoformat()}'
-            )
-            """
-        self.c.execute(q)
-        
-        return self.events
-        
+        return sorted(p.events, key=lambda x: x.date)
+
     def cost_basis(self, category: str, ticker: str) -> float:
         assets = self.query(category=category, ticker=ticker)
         
@@ -168,13 +59,42 @@ class Portfolio:
         return self.assets.units.sum()
     
     def grant_option(self, ticker: str, price: float, units: int, date: Arrow) -> Event:
-        event = Event('option grant', ticker, price, units, date)
-        self._upsert_event(event)
-        option = Asset('option', ticker, price, units, date)
-        self._upsert_asset(option)
+        event = Event('grant option', ticker, price, units, date)
+        self._events.append(event)
+        option = Asset(price, units, date)
+        lifecycle = Lifecycle(ticker, option)
+        self.fifo.append(lifecycle)
+        self.lifo.insert(0, lifecycle)
         
         return event
     
+    def exercise_options(self, ticker: str, price: float, units: int, date: Arrow, fmv: float) -> Event:
+        event = Event('option exercise', ticker, price, units, date)
+        self._upsert_event(event)
+        a = self.query('assets', category='option', ticker=ticker)
+
+        o = a[a.price == price].units.cumsum().reset_index()
+        # index of first unit that brings the cumsum over the amount we want to exercise
+        over_target_ix = o[o.units >= units].iloc[0].name
+        # get the original `p.assets` indeces of all the target units
+        target_grants = o.iloc[0:over_target_ix + 1]
+        # subtract the units to exercise from the cumulative amount to get the 
+        # remainder we want to replace as the value of the last grant in our set
+        remainder = target_grants.iloc[-1].units - units
+        
+        grant_to_update_ix = target_grants['_ID'].iloc[-1]
+        grant_to_update = a.iloc[grant_to_update_ix]
+        partial_grant = Asset(**grant_to_update.to_dict())
+        partial_grant.units = remainder
+
+        self._remove_assets(target_grants['_ID'].iloc[:-1].tolist())
+        self._upsert_asset(partial_grant, _id=grant_to_update_ix)
+        
+        stock = Asset('stock', ticker, price, units, date, fmv)
+        self._upsert_asset(stock)
+        
+        return event
+
     def grant_options_from_schedule(self, 
                                     ticker: str, 
                                     price: float, 
@@ -210,33 +130,7 @@ class Portfolio:
                 self.grant_option(ticker, price, amount_to_grant, chunk_date)
                 amount_to_grant = 0            
         
-    def exercise_options(self, ticker: str, price: float, units: int, date: Arrow, fmv: float) -> Event:
-        event = Event('option exercise', ticker, price, units, date)
-        self._upsert_event(event)
-        a = self.query('assets', category='option', ticker=ticker)
-
-        o = a[a.price == price].units.cumsum().reset_index()
-        # index of first unit that brings the cumsum over the amount we want to exercise
-        over_target_ix = o[o.units >= units].iloc[0].name
-        # get the original `p.assets` indeces of all the target units
-        target_grants = o.iloc[0:over_target_ix + 1]
-        # subtract the units to exercise from the cumulative amount to get the 
-        # remainder we want to replace as the value of the last grant in our set
-        remainder = target_grants.iloc[-1].units - units
         
-        grant_to_update_ix = target_grants['_ID'].iloc[-1]
-        grant_to_update = a.iloc[grant_to_update_ix]
-        partial_grant = Asset(**grant_to_update.to_dict())
-        partial_grant.units = remainder
-
-        self._remove_assets(target_grants['_ID'].iloc[:-1].tolist())
-        self._upsert_asset(partial_grant, _id=grant_to_update_ix)
-        
-        stock = Asset('stock', ticker, price, units, date, fmv)
-        self._upsert_asset(stock)
-        
-        return event
-
     def get_tax_info(self, capital_gains=False) -> (int, list):
         """Fetch tax brackets and deduction amount for a region of the US for FY2020 
         :param region: Can be any of the 50 states, `district of columbia`, or `federal`
