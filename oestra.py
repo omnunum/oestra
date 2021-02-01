@@ -1,16 +1,15 @@
+import logging 
+
 from copy import deepcopy
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from datetime import timedelta
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Tuple
 from tempfile import NamedTemporaryFile
+
 import arrow
 from arrow import Arrow
-import pandas as pd
-import sqlite3
-import logging 
 import requests as rq
-from typing import List, Tuple
 
 
 @dataclass
