@@ -1,3 +1,4 @@
+from copy import deepcopy
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from datetime import timedelta
@@ -24,7 +25,7 @@ class Lifecycle:
     ticker: str
     option: Asset
     stock: Optional[Asset] = None
-    sold: Optional[bool] = None
+    sale: Optional[Asset] = None
 
 @dataclass
 class Event:
@@ -33,68 +34,198 @@ class Event:
     price: float
     units: int
     date: Arrow
+    fmv: Optional[float] = None
 
 
 class Portfolio:
-    def __init__(self, region: str, filing_status: str, initial_cash: Optional[float] = None):
+    def __init__(self, filings, initial_cash: Optional[float] = None):
         self.cash = initial_cash
-        self.region = region
-        self.filing_status = filing_status
+        
+        # create adjusted gross income with any provided withholdings
+        for year in filings.values():
+            year['agi'] = year['gross_income'] - year.get('withholdings', 0)
+            
+        self.filings = filings
         self._events = []
-        self.fifo = []
-        self.lifo = []
+        self.lifecycles = []
         
     @property
     def events(self):
-        return sorted(p.events, key=lambda x: x.date)
-
-    def cost_basis(self, category: str, ticker: str) -> float:
-        assets = self.query(category=category, ticker=ticker)
-        
-        return (self.assets.price * self.assets.units).sum()
-    
-    def total_amount(self, category: str, ticker: str) -> int:
-        assets = self.query(category=category, ticker=ticker)
-        
-        return self.assets.units.sum()
-    
-    def grant_option(self, ticker: str, price: float, units: int, date: Arrow) -> Event:
+        return sorted(self._events, key=lambda x: x.date)
+            
+    def grant_option(self, ticker: str, price: float, units: int, date: Arrow) -> None:
         event = Event('grant option', ticker, price, units, date)
         self._events.append(event)
         option = Asset(price, units, date)
         lifecycle = Lifecycle(ticker, option)
-        self.fifo.append(lifecycle)
-        self.lifo.insert(0, lifecycle)
+        self.lifecycles.append(lifecycle)
+            
+    def exercise_options(self, 
+                         ticker: str, 
+                         units: int, 
+                         date: Arrow, 
+                         fmv: float, 
+                         optimize: Optional[str] = 'date'
+                        ) -> None:
+        """Optimizing for `date` is for strategies trying to use capital gains tax rates and minimize income tax liability. 
+        Options have to be granted two years prior and exercised one year prior to sale, so we always
+        want to be exercising the oldest options first.
         
-        return event
+        Optimizing for `price` is for strategies trying to minimize amt tax. The `((fmv * units) - (price * units))`
+        has to stay below a threshold per year, so by reducing the difference between strike price and fmv we
+        can minimize amt tax liability."""
+        unexercised = [
+            (i, l) for i, l in enumerate(self.lifecycles) 
+            if l.ticker == ticker
+            # presence of stock means option already exercised
+            and l.stock is None
+        ]
+        
+        if optimize == 'date':
+            unexercised = sorted(unexercised, key=lambda x: x[1].option.date)
+        elif optimize == 'price':
+            unexercised = sorted(unexercised, key=lambda x: x[1].option.price, reverse=True)
+            
+        for i, l in unexercised:
+            # if the current option grant can be exercised in whole
+            if l.option.units <= units:
+                self.lifecycles[i].stock = Asset(l.option.price, l.option.units, date, fmv)
+                units -= l.option.units
+            # if the current option cant be exercised whole, split lifecycle 
+            # into two and exercise just one of them
+            else:
+                # part to leave unexercised
+                partial = deepcopy(l)
+                partial.option.units -= units
+                self.lifecycles.insert(i + 1, partial)
+                # part to exercise
+                l.option.units = units
+                l.stock = Asset(l.option.price, units, date, fmv)
+                self.lifecycles[i] = l
+                units = 0
+            
+            self._events.append(Event('exercise option', ticker, l.option.price, l.option.units, date, fmv))
+            # leave loop if we've exhausted all units
+            if not units:
+                break
+                
+    def sell_stock(self, 
+                    ticker: str, 
+                    units: int, 
+                    date: Arrow, 
+                    fmv: float, 
+                    optimize: Optional[str] = 'date'
+                    ) -> None:
+        unsold = [
+            (i, l) for i, l in enumerate(self.lifecycles) 
+            if l.ticker == ticker
+            and l.sale is None
+        ]
+        
+        if optimize == 'date':
+            unexercised = sorted(unexercised, key=lambda x: x[1].stock.date)
+        elif optimize == 'price':
+            unexercised = sorted(unexercised, key=lambda x: x[1].stock.price, reverse=True)
+        
+        for i, l in unsold:
+            # if the current option grant can be exercised in whole
+            if l.stock.units <= units:
+                self.lifecycles[i].sale = Asset(l.stock.price, l.stock.units, date, fmv)
+                units -= l.stock.units
+            # if the current stock cant be exercised whole, split lifecycle 
+            # into two and exercise just one of them
+            else:
+                # part to leave unsold
+                partial = copy(l)
+                partial.stock.units -= units
+                self.lifecycles.insert(i + 1, partial)
+                # part to exercise
+                l.stock.units = units
+                l.sale = Asset(l.stock.price, units, date, fmv)
+                self.lifecycles[i] = l
+                units = 0
+            
+            self._events.append(Event('sell stock', ticker, l.stock.price, l.stock.units, date, fmv))
+            # leave loop if we've exhausted all units
+            if not units:
+                break
+        
+    def evolve_asset(self,
+        event: str,
+        ticker: str, 
+        units: int, 
+        date: Optional[Arrow] = None, 
+        fmv: Optional[float] = None,
+        price: Optional[float] = None,
+        optimize: Optional[str] = 'date',
+    ) -> None:
+        date = date or Arrow.utcnow()
+        
+        if event == 'sell stocks':
+            source, destination = 'stock', 'sale'
+        elif event == 'exercise options':
+            source, destination = 'option', 'stock'
+        else:
+            raise ValueError(f"{event} is not a valid event")
+            
+        evolvable = [
+            (i, l) for i, l in enumerate(self.lifecycles) 
+            if l.ticker == ticker
+            and getattr(l, destination) is None
+        ]
+        
+        if optimize == 'date':
+            evolvable = sorted(evolvable, key=lambda x: getattr(x[1], source).date)
+        elif optimize == 'price':
+            evolvable = sorted(evolvable, key=lambda x: getattr(x[1], source).price, reverse=True)
+        
+        for i, l in evolvable: 
+            s = getattr(l, source)
+            # if the current option grant can be exercised in whole
+            if s.units <= units:
+                setattr(self.lifecycles[i], destination, Asset(s.price, s.units, date, fmv))
+                units -= s.units
+            # if the current stock cant be exercised whole, split lifecycle 
+            # into two and exercise just one of them
+            else:
+                # part to leave unsold
+                partial = deepcopy(l)
+                getattr(partial, source).units -= units
+                self.lifecycles.insert(i + 1, partial)
+                # part to exercise
+                s.units = units
+                destination_price = price if event == 'sell stocks' else s.price
+                setattr(l, destination, Asset(destination_price, units, date, fmv))
+                self.lifecycles[i] = l
+                units = 0
+            
+            self._events.append(Event(event, ticker, s.price, s.units, date, fmv))
+            # leave loop if we've exhausted all units
+            if not units:
+                break
+
+    def add_months_to_date(self, months: int, begin_date: Arrow) -> Arrow:
+        # get date at this chunk of options
+        year_delta, month_delta = divmod(months, 12)
+        target_year = begin_date.year + year_delta
+        target_month = begin_date.month + month_delta
+
+        # roll target month into year if greater than 12
+        year_roll, target_month = divmod(target_month, 12)
+        target_year += year_roll
+
+        try:
+            target_date = Arrow(target_year, target_month + 1, begin_date.day)
+        except ValueError as e:
+            if "day is out of range" in e.args[0]:
+                first_of_month = Arrow(target_year, target_month + 1, 1)
+                last_of_month = first_of_month.ceil('month').floor('day')
+                target_date = last_of_month
+            else: 
+                print(target_year, target_month, begin_date.date)
+                raise e
+        return target_date
     
-    def exercise_options(self, ticker: str, price: float, units: int, date: Arrow, fmv: float) -> Event:
-        event = Event('option exercise', ticker, price, units, date)
-        self._upsert_event(event)
-        a = self.query('assets', category='option', ticker=ticker)
-
-        o = a[a.price == price].units.cumsum().reset_index()
-        # index of first unit that brings the cumsum over the amount we want to exercise
-        over_target_ix = o[o.units >= units].iloc[0].name
-        # get the original `p.assets` indeces of all the target units
-        target_grants = o.iloc[0:over_target_ix + 1]
-        # subtract the units to exercise from the cumulative amount to get the 
-        # remainder we want to replace as the value of the last grant in our set
-        remainder = target_grants.iloc[-1].units - units
-        
-        grant_to_update_ix = target_grants['_ID'].iloc[-1]
-        grant_to_update = a.iloc[grant_to_update_ix]
-        partial_grant = Asset(**grant_to_update.to_dict())
-        partial_grant.units = remainder
-
-        self._remove_assets(target_grants['_ID'].iloc[:-1].tolist())
-        self._upsert_asset(partial_grant, _id=grant_to_update_ix)
-        
-        stock = Asset('stock', ticker, price, units, date, fmv)
-        self._upsert_asset(stock)
-        
-        return event
-
     def grant_options_from_schedule(self, 
                                     ticker: str, 
                                     price: float, 
@@ -103,23 +234,28 @@ class Portfolio:
                                     cliff_date: Arrow,
                                     cutoff_date=Arrow.utcnow(),
                                     num_months=48):
+        # if cliff, vest the period all at once and reset parameters
+        # to be based off the state at the cliff date
+        if cliff_date:
+            if cutoff_date < cliff_date:
+                return
+            elif cliff_date != begin_date:
+                from_year = (cliff_date.year - begin_date.year) * 12
+                from_months = (cliff_date.month - begin_date.month)
+                months_vested_at_cliff = from_year + from_months
+                cliff_units = int((units / num_months) * months_vested_at_cliff)
+                self.grant_option(ticker, price, cliff_units, cliff_date)
+                
+                units -= cliff_units
+                num_months -= months_vested_at_cliff
+                begin_date = cliff_date
+            
         raw_chunk_size, remainder = divmod(units, num_months)
-        amount_to_grant = 0
         for i in range(num_months):
             # "consume" from the remainder while it exists
-            chunk_size = raw_chunk_size + 1 if i < remainder else raw_chunk_size
-            amount_to_grant += chunk_size
+            chunk_size = raw_chunk_size + 1 if i > remainder else raw_chunk_size
             
-            # get date at this chunk of options
-            year_delta, month_delta = divmod(i, 12)
-            chunk_year = begin_date.year + year_delta
-            chunk_month = begin_date.month + month_delta
-
-            # roll chunk month into year if greater than 12
-            year_roll, chunk_month = divmod(chunk_month, 12)
-            chunk_year += year_roll
-            
-            chunk_date = Arrow(chunk_year, chunk_month + 1, begin_date.day)
+            chunk_date = self.add_months_to_date(i, begin_date)
             
             # we can't get grants until the cliff (if it exists) is over
             beyond_cliff = cliff_date is None or chunk_date >= cliff_date
@@ -127,31 +263,33 @@ class Portfolio:
             # the cutoff date is manually set into the future
             not_cut_off = cutoff_date is None or chunk_date <= cutoff_date
             if beyond_cliff and not_cut_off:
-                self.grant_option(ticker, price, amount_to_grant, chunk_date)
-                amount_to_grant = 0            
+                self.grant_option(ticker, price, chunk_size, chunk_date)
         
         
-    def get_tax_info(self, capital_gains=False) -> (int, list):
+    def get_tax_info(self, year: int, region: str, status: str, capital_gains=False) -> (int, list):
         """Fetch tax brackets and deduction amount for a region of the US for FY2020 
         :param region: Can be any of the 50 states, `district of columbia`, or `federal`
         :param filing_status: Options are (single, married, married_separately, head_of_household)
         :param capital_gains: Whether you want to return capital gains rates instead of income
         """
-        if capital_gains and self.region != 'federal':
+        if capital_gains and region != 'federal':
             raise ValueError("Can only apply capital gains rate to `federal` region")
 
         normalized_region = region.lower().replace(' ', '_')
-        url = (f"https://raw.githubusercontent.com/taxee/taxee-tax-statistics"
-               f"/master/src/statistics/2020/{normalized_region}.json")
+        year = min(year, 2020)
+        url = (
+            f"https://raw.githubusercontent.com/taxee/taxee-tax-statistics"
+            f"/master/src/statistics/{year}/{normalized_region}.json"
+        )
         res = rq.get(url)
         try:
             res.raise_for_status()
         except rq.RequestException as e:
-            raise ValueError(f"'{self.region}' is not a valid region")
+            raise ValueError(f"'{region}' is not a valid region")
         if region == 'federal':
-            data = res.json()['tax_withholding_percentage_method_tables']['annual'][self.filing_status]
+            data = res.json()['tax_withholding_percentage_method_tables']['annual'][status]
         else:
-            data = res.json()[self.filing_status]
+            data = res.json()[status]
         deduction = data['deductions'][0]['deduction_amount']
         rate_key = 'marginal_capital_gain_rate' if capital_gains else 'marginal_rate'
         brackets = data['income_tax_brackets']
@@ -162,7 +300,7 @@ class Portfolio:
         
         return deduction, brackets
     
-    def taxes(self, income: float, brackets: List[dict]) -> float:
+    def apply_tax_brackets(self, income: float, brackets: List[dict]) -> float:
         """Calculate taxes owed based on progressive bracket"""
         taxes = 0
         for i, bracket in enumerate(brackets):
@@ -186,61 +324,127 @@ class Portfolio:
             
         return taxes
 
-    def calculate_payroll_tax(self, income: float) -> float:
-        social_security_bracket = [{'income_level': 142_800, 'marginal_rate': 0.062}]
+    def calculate_payroll_tax(self, year: int) -> float:
+        social_security_bracket = [{
+            'income_level': 142_800, 
+             'marginal_rate': 0.062
+        }]
         medicare_rate = 0.0145
-        
-        social_security_tax = taxes(income, social_security_bracket)
+        gross_income = self.filings[year]['gross_income']
+        social_security_tax = self.apply_tax_brackets(gross_income, social_security_bracket)
         medicare_tax = gross_income * medicare_rate
         payroll_tax = social_security_tax + medicare_tax
         
         return payroll_tax
     
-    def calculate_income_taxes(
-        income: float, 
-        filing_state: str, 
-        filing_status='single', 
-        federal_deduction=None, 
-        state_deduction=None,
-    ) -> dict:
-        standard_state_deduction, state_income_brackets = get_tax_info(filing_state, filing_status)
-        standard_federal_deduction, federal_income_brackets = get_tax_info('federal', filing_status)
+    def calculate_income_taxes(self, year: int, gains: Optional[float] = None) -> dict:
+        f = self.filings[year]
+        
+        standard_state_deduction, state_brackets = self.get_tax_info(year, f['filing_state'], f['filing_status'])
+        standard_federal_deduction, federal_brackets = self.get_tax_info(year, 'federal', f['filing_status'])
 
         # apply custom deductions if available
-        federal_deduction = federal_deduction or standard_federal_deduction
-        state_deduction = state_deduction or standard_federal_deduction
+        federal_deduction = f.get("federal_deduction") or standard_federal_deduction
+        state_deduction = f.get("state_deduction") or standard_federal_deduction
 
-        federal_income_tax = taxes(income - federal_deduction, federal_income_brackets) 
-        state_income_tax = taxes(income - state_deduction, state_income_brackets) 
+        agi_deducted_fed = f['agi'] - federal_deduction
+        agi_deducted_state = f['agi'] - state_deduction
+        
+        federal = self.apply_tax_brackets(agi_deducted_fed, federal_brackets) 
+        state = self.apply_tax_brackets(agi_deducted_state, state_brackets) 
+
+        if gains is not None:
+            federal_with_gains = self.apply_tax_brackets(agi_deducted_fed + gains, federal_brackets) 
+            state_with_gains = self.apply_tax_brackets(agi_deducted_state + gains, state_brackets) 
+            federal = federal_with_gains - federal
+            state = state_with_gains - state
 
         return {
-            'federal': federal_income_tax, 
-            'state': state_income_tax, 
+            'federal': federal,
+            'state': state
         }
     
-    def calculate_amt_taxes(income: float, options: Tuple[float, int]) -> float:
-        amt_exemption = 72_900
-        cost_basis = sum(o[0] * o[1] for o in options)
-        number_of_options = sum(o[1] for o in options)
-        avg_price_per_share = cost_basis / number_of_options
-        valuation_at_exercise = number_of_options * fmv
+    def calculate_capital_gains_taxes(self, year: int) -> dict:
+        f = self.filings[year]
+        lifecycles = self.group_lifecycles(lambda x: x.sale.date.year)[year]
+        short_gains, long_gains = 0, 0
+        for l in lifecycles:
+            # ISO requirements to qualify for long term cap gains
+            granted_two_years_ago = (l.sale.date - l.option.date).days >= 730
+            exercised_one_year_ago = (l.sale.date - l.stock.date).days >= 365
+            option_basis = l.option.price * l.option.units
+            stock_sale = l.stock.price * l.stock.units
+            if granted_two_years_ago and exercised_one_year_ago:
+                long_gains += stock_sale - option_basis
+            else:
+                short_gains += stock_sale - option_basis
 
-        exercise_spread = valuation_at_exercise - cost_basis
-        amt_base = agi + exercise_spread - amt_exemption
+        taxes = self.calculate_income_taxes(year, short_gains)
+        _, cap_gains_brackets = self.get_tax_info(year, 'federal', f['filing_status'], capital_gains=True)
+        taxes['capital_gains'] = self.apply_tax_brackets(long_gains, cap_gains_brackets)
+        
+        return taxes
+        
+    def group_lifecycles(self, by: callable) -> dict:
+        grouped = defaultdict(list)
+        for l in self.lifecycles:
+            try:
+                grouped[by(l)].append(l)
+            except AttributeError:
+                continue
+                
+        return grouped
+    
+    def calculate_amt_taxes(self, year: int) -> float:
+        amt_exemption = 72_900
         amt_tax_rate = 0.26
+        
+        lifecycles = self.group_lifecycles(lambda x: x.stock.date.year)[year]
+        exercised = [l for l in lifecycles if l.stock is not None]
+        exercise_spread = sum(
+            (l.stock.fmv * l.stock.units) - (l.option.units * l.option.price) 
+            for l in exercised
+        )
+
+        amt_base = self.filings[year]['agi'] + exercise_spread - amt_exemption
         tmt = amt_base * amt_tax_rate
+        income_taxes = self.calculate_income_taxes(year)
         amt_tax = max(0, tmt - income_taxes['federal'])
 
         return amt_tax
 
-    def calculate_capital_gains_taxes(self,
-        income: float,
-        year=None
-        ) -> float:
-        cost_basis = sum(o[0] * o[1] for o in options)
-        number_of_options = sum(o[1] for o in options)
 
-        valuation_at_sale = number_of_options * target_price
-        gains_from_sale = valuation_at_sale - cost_basis
-        _, cap_gains_brackets = get_tax_info('federal', 'single', capital_gains=True)
-        cap_gains_tax = taxes(gains_from_sale, cap_gains_brackets)
+if __name__ == '__main__':
+    target_price = 120
+
+    filings = {
+        2019: {
+            "gross_income": 126_730.64,
+            "withholdings": (6_000 + 2_395.91 + 23), # 401k, HSA, Dental
+            "filing_state": "georgia",
+            "filing_status": "single",
+            "federal_deduction": None,
+            "state_deduction": None
+        }, 
+        2020: {
+            "gross_income": 127_200,
+            "withholdings": (18_000 + 2_500 + 22),
+            "filing_state": "georgia",
+            "filing_status": "single"
+        },
+        2021: {
+            "gross_income": 130_800,
+            "withholdings": (18_000 + 2_500 + 22),
+            "filing_state": "georgia",
+            "filing_status": "single"
+        }
+    }
+    p = Portfolio(filings, 13_000)
+    p.grant_options_from_schedule('JEFF', 2.18, 8000, Arrow(2019, 1, 7), Arrow(2020, 1, 7))
+    p.grant_options_from_schedule('JEFF', 3.08, 5000, Arrow(2020, 6, 1), None)
+    p.evolve_asset('exercise options', 'JEFF', 2400, Arrow(2020, 12, 30), 15)
+    p.evolve_asset('exercise options', 'JEFF', 10000, Arrow(2021, 1, 31), 16.57)
+    # p.exercise_options('JEFF', 2400, Arrow(2020, 12, 30), 15)
+    # p.exercise_options('JEFF', 10000, Arrow(2021, 1, 31), 16.57)
+    # p.evolve_asset('sell stock', 'JEFF', 1000, 500)
+    print(p.calculate_amt_taxes(2020), p.calculate_capital_gains_taxes(2020))
