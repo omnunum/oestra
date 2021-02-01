@@ -246,19 +246,7 @@ class Portfolio:
             
         return max(0, taxes)
 
-    def calculate_payroll_tax(self, year: int) -> float:
-        social_security_bracket = [{
-            'income_level': 142_800, 
-             'marginal_rate': 0.062
-        }]
-        medicare_rate = 0.0145
-        gross_income = self.filings[year]['gross_income']
-        social_security_tax = self.apply_tax_brackets(gross_income, social_security_bracket)
-        medicare_tax = gross_income * medicare_rate
-        payroll_tax = social_security_tax + medicare_tax
-        
-        return payroll_tax
-    
+
     def calculate_income_taxes(self, year: int, gains: Optional[float] = None) -> dict:
         f = self.filings[year]
         
