@@ -59,97 +59,21 @@ class Portfolio:
         option = Asset(price, units, date)
         lifecycle = Lifecycle(ticker, option)
         self.lifecycles.append(lifecycle)
-            
-    def exercise_options(self, 
-                         ticker: str, 
-                         units: int, 
-                         date: Arrow, 
-                         fmv: float, 
-                         optimize: Optional[str] = 'date'
-                        ) -> None:
-        """Optimizing for `date` is for strategies trying to use capital gains tax rates and minimize income tax liability. 
-        Options have to be granted two years prior and exercised one year prior to sale, so we always
-        want to be exercising the oldest options first.
-        
-        Optimizing for `price` is for strategies trying to minimize amt tax. The `((fmv * units) - (price * units))`
-        has to stay below a threshold per year, so by reducing the difference between strike price and fmv we
-        can minimize amt tax liability."""
-        unexercised = [
-            (i, l) for i, l in enumerate(self.lifecycles) 
-            if l.ticker == ticker
-            # presence of stock means option already exercised
-            and l.stock is None
-        ]
-        
-        if optimize == 'date':
-            unexercised = sorted(unexercised, key=lambda x: x[1].option.date)
-        elif optimize == 'price':
-            unexercised = sorted(unexercised, key=lambda x: x[1].option.price, reverse=True)
-            
-        for i, l in unexercised:
-            # if the current option grant can be exercised in whole
-            if l.option.units <= units:
-                self.lifecycles[i].stock = Asset(l.option.price, l.option.units, date, fmv)
-                units -= l.option.units
-            # if the current option cant be exercised whole, split lifecycle 
-            # into two and exercise just one of them
-            else:
-                # part to leave unexercised
-                partial = deepcopy(l)
-                partial.option.units -= units
-                self.lifecycles.insert(i + 1, partial)
-                # part to exercise
-                l.option.units = units
-                l.stock = Asset(l.option.price, units, date, fmv)
-                self.lifecycles[i] = l
-                units = 0
-            
-            self._events.append(Event('exercise option', ticker, l.option.price, l.option.units, date, fmv))
-            # leave loop if we've exhausted all units
-            if not units:
-                break
-                
-    def sell_stock(self, 
-                    ticker: str, 
-                    units: int, 
-                    date: Arrow, 
-                    fmv: float, 
-                    optimize: Optional[str] = 'date'
-                    ) -> None:
-        unsold = [
-            (i, l) for i, l in enumerate(self.lifecycles) 
-            if l.ticker == ticker
-            and l.sale is None
-        ]
-        
-        if optimize == 'date':
-            unexercised = sorted(unexercised, key=lambda x: x[1].stock.date)
-        elif optimize == 'price':
-            unexercised = sorted(unexercised, key=lambda x: x[1].stock.price, reverse=True)
-        
-        for i, l in unsold:
-            # if the current option grant can be exercised in whole
-            if l.stock.units <= units:
-                self.lifecycles[i].sale = Asset(l.stock.price, l.stock.units, date, fmv)
-                units -= l.stock.units
-            # if the current stock cant be exercised whole, split lifecycle 
-            # into two and exercise just one of them
-            else:
-                # part to leave unsold
-                partial = copy(l)
-                partial.stock.units -= units
-                self.lifecycles.insert(i + 1, partial)
-                # part to exercise
-                l.stock.units = units
-                l.sale = Asset(l.stock.price, units, date, fmv)
-                self.lifecycles[i] = l
-                units = 0
-            
-            self._events.append(Event('sell stock', ticker, l.stock.price, l.stock.units, date, fmv))
-            # leave loop if we've exhausted all units
-            if not units:
-                break
-        
+
+
+    def split_lifecycle(self, l: Lifecycle, units: int) -> (Lifecycle, Lifecycle):
+        # part to leave unsold
+        resized, remainder = deepcopy(l), deepcopy(l)
+        base_units = l.option.units
+        resized.option.units = units
+        remainder.option.units = base_units - units
+        if l.stock is not None:
+            resized.stock.units = units
+            remainder.stock.units = base_units - units
+
+        return resized, remainder
+
+
     def evolve_asset(self,
         event: str,
         ticker: str, 
@@ -172,6 +96,7 @@ class Portfolio:
             (i, l) for i, l in enumerate(self.lifecycles) 
             if l.ticker == ticker
             and getattr(l, destination) is None
+            and getattr(l, source) is not None
         ]
         
         if optimize == 'date':
@@ -188,15 +113,12 @@ class Portfolio:
             # if the current stock cant be exercised whole, split lifecycle 
             # into two and exercise just one of them
             else:
-                # part to leave unsold
-                partial = deepcopy(l)
-                getattr(partial, source).units -= units
-                self.lifecycles.insert(i + 1, partial)
-                # part to exercise
-                s.units = units
+                resized, remainder = self.split_lifecycle(l, units)
+                self.lifecycles.insert(i + 1, remainder)
+                
                 destination_price = price if event == 'sell stocks' else s.price
-                setattr(l, destination, Asset(destination_price, units, date, fmv))
-                self.lifecycles[i] = l
+                setattr(resized, destination, Asset(destination_price, units, date, fmv))
+                self.lifecycles[i] = resized
                 units = 0
             
             self._events.append(Event(event, ticker, s.price, s.units, date, fmv))
@@ -322,7 +244,7 @@ class Portfolio:
         if income:
             taxes += income * brackets[-1]['marginal_rate']
             
-        return taxes
+        return max(0, taxes)
 
     def calculate_payroll_tax(self, year: int) -> float:
         social_security_bracket = [{
@@ -372,12 +294,12 @@ class Portfolio:
             # ISO requirements to qualify for long term cap gains
             granted_two_years_ago = (l.sale.date - l.option.date).days >= 730
             exercised_one_year_ago = (l.sale.date - l.stock.date).days >= 365
-            option_basis = l.option.price * l.option.units
-            stock_sale = l.stock.price * l.stock.units
+            stock_basis = l.stock.price * l.stock.units
+            stock_sale = l.sale.price * l.sale.units
             if granted_two_years_ago and exercised_one_year_ago:
-                long_gains += stock_sale - option_basis
+                long_gains += stock_sale - stock_basis
             else:
-                short_gains += stock_sale - option_basis
+                short_gains += stock_sale - stock_basis
 
         taxes = self.calculate_income_taxes(year, short_gains)
         _, cap_gains_brackets = self.get_tax_info(year, 'federal', f['filing_status'], capital_gains=True)
@@ -411,7 +333,7 @@ class Portfolio:
         income_taxes = self.calculate_income_taxes(year)
         amt_tax = max(0, tmt - income_taxes['federal'])
 
-        return amt_tax
+        return max(0, amt_tax)
 
 
 if __name__ == '__main__':
@@ -442,9 +364,9 @@ if __name__ == '__main__':
     p = Portfolio(filings, 13_000)
     p.grant_options_from_schedule('JEFF', 2.18, 8000, Arrow(2019, 1, 7), Arrow(2020, 1, 7))
     p.grant_options_from_schedule('JEFF', 3.08, 5000, Arrow(2020, 6, 1), None)
-    p.evolve_asset('exercise options', 'JEFF', 2400, Arrow(2020, 12, 30), 15)
-    p.evolve_asset('exercise options', 'JEFF', 10000, Arrow(2021, 1, 31), 16.57)
+    p.evolve_asset('exercise options', 'JEFF', 2400, Arrow(2020, 12, 30), fmv=15)
+    p.evolve_asset('exercise options', 'JEFF', 10000, Arrow(2021, 1, 31), fmv=16.57)
     # p.exercise_options('JEFF', 2400, Arrow(2020, 12, 30), 15)
     # p.exercise_options('JEFF', 10000, Arrow(2021, 1, 31), 16.57)
-    # p.evolve_asset('sell stock', 'JEFF', 1000, 500)
-    print(p.calculate_amt_taxes(2020), p.calculate_capital_gains_taxes(2020))
+    p.evolve_asset('sell stocks', 'JEFF', 1000, price=50)
+    print(p.calculate_amt_taxes(2021), p.calculate_capital_gains_taxes(2021))
