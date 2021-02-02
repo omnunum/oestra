@@ -1,4 +1,10 @@
 import { DateTime, Duration } from 'luxon';
+import { createApp } from 'vue'
+import App from './App.vue'
+
+createApp(App).mount('#app')
+
+
 
 let Asset = class {
     constructor(price, units, date, fmv) {
@@ -89,8 +95,6 @@ let Portfolio = class {
 
 
 };
-
-var target_price = 120;
 
 var filings = {
     2019: {
