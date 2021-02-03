@@ -1,9 +1,10 @@
+var _ = require('lodash');
+var superagent = require('superagent');
 import { DateTime, Duration } from 'luxon';
 import { createApp } from 'vue'
 import App from './App.vue'
 
-createApp(App).mount('#app')
-
+createApp(App).mount('#app') 
 
 
 let Asset = class {
@@ -73,53 +74,265 @@ let Portfolio = class {
                 num_months -= months_vested_at_cliff;
                 begin_date = cliff_date;
             }
-            var raw_chunk_size = ~~(units/num_months);
-            var remainder = units % num_months;
-            var i;
-            for (i = 0; i < num_months; i++) {
-                // "consume" from the remainder while it exists
-                let chunk_size = i > remainder ? raw_chunk_size + 1 : raw_chunk_size;
-                let chunk_date = begin_date.plus(Duration.fromObject({months: i}));
-                
-                // we can't get grants until the cliff (if it exists) is over
-                let beyond_cliff = (cliff_date === undefined || chunk_date >= cliff_date);
-                // we want to add chunks up until this point in time unless
-                // the cutoff date is manually set into the future
-                let not_cut_off = (cutoff_date === undefined || chunk_date <= cutoff_date);
-                if (beyond_cliff && not_cut_off) {
-                    this.grant_option(ticker, price, chunk_size, chunk_date) ;   
-                }
+        }
+        var raw_chunk_size = ~~(units/num_months);
+        var remainder = units % num_months;
+        var i;
+        for (i = 0; i < num_months; i++) {
+            // "consume" from the remainder while it exists
+            let chunk_size = i > remainder ? raw_chunk_size + 1 : raw_chunk_size;
+            let chunk_date = begin_date.plus(Duration.fromObject({months: i}));
+            
+            // we can't get grants until the cliff (if it exists) is over
+            let beyond_cliff = (cliff_date === undefined || chunk_date >= cliff_date);
+            // we want to add chunks up until this point in time unless
+            // the cutoff date is manually set into the future
+            let not_cut_off = (cutoff_date === undefined || chunk_date <= cutoff_date);
+            if (beyond_cliff && not_cut_off) {
+                this.grant_option(ticker, price, chunk_size, chunk_date) ;   
             }
+        }
+        
+    }
+
+    split_lifecycle(l, units) {
+        // part to leave unsold
+        let resized = _.cloneDeep(l);
+        let remainder = _.cloneDeep(l);
+        let base_units = l.option.units
+        resized.option.units = units
+        remainder.option.units = base_units - units
+        if (l.stock) {
+            resized.stock.units = units
+            remainder.stock.units = base_units - units
+        }
+        return resized, remainder
+    }
+
+    evolve_asset(event, ticker, units, date=null, fmv=null, price=null, optimize='date') {
+        date = date || DateTime.utc();
+
+        switch (event) {
+            case 'sell stocks':
+                var source, destination = ('stock', 'sale');
+                break;
+            case 'exercise options':
+                source, destination = ('option', 'stock');
+                break;
+            default:
+                throw `${event} is not a valid event`;
+        }
+
+        let evolvable = [];
+        for (const [i, l] of this.lifecycles.entries()) {
+            if (l.ticker == ticker && l[destination] == null && l[source] != null) {
+                evolvable.push((i, l))
+            }
+        }
+
+        switch (optimize) {
+            case 'date':
+                evolvable = evolvable.sort((a, b) => a[1][source].date - b[1][source].date);
+                break;
+            case 'price':
+                evolvable = evolvable.sort((a, b) => b[1][source].price - a[1][source].price);
+                break;
+        }
+
+        for (const [i, l] of evolvable.entries()) {
+            let s = l[source];
+            // if the current option grant can be exercised in whole
+            if (s.units <= units) {
+                this.lifecycles[i][destination] = new Asset(s.price, s.units, date, fmv);
+                units -= s.units;
+            // if the current stock cant be exercised whole, split lifecycle 
+            // into two and exercise just one of them
+            } else {
+                var resized, remainder = this.split_lifecycle(l, units);
+                this.lifecycles.splice(i + 1, 0, remainder);
+
+                let destination_price = event == 'sell stocks' ? price : s.price;
+                resized[destination] = new Asset(destination_price, units, date, fmv);
+                this.lifecycles[i] = resized;
+                units = 0;
+            }
+            this._events.push(Event(event, ticker, s/price, s.units, date, fmv));
+            // leave loop if we've exhausted all units
+            if (!units){ break; }
+        } 
+
+    }
+
+    get_tax_info(year, region, status, capital_gains = false) {
+        if (capital_gains && region != 'federal') {
+            throw new Error('can only apply capital gains rate to `federal` region');
+        }
+        let normalized_region = region.toLowerCase().replace(' ', '_');
+        year = _.min(year, 2020);
+        let url = (
+            "https://raw.githubusercontent.com/taxee/taxee-tax-statistics" +
+            `/master/src/statistics/${year}/${normalized_region}.json`
+        )
+        var res;
+        superagent.get(url).end((e, r) => {
+            if (e || r.status == 404) {
+                throw new Error(`${region} is not a valid region`);
+            }
+            res = JSON.parse(r.body);
+        })
+        if (region == 'federal') {
+            var data = res.tax_withholding_percentage_method_tables.annual[status];
+        } else {
+            data = res[status];
+        }
+        let deduction = data.deductions[0].deduction_amount;
+        let rate_key = capital_gains ? 'marginal_capital_gain_rate' : 'marginal_rate';
+        let brackets = data.income_tax_brackets;
+        brackets = _.map(brackets, (d) => {
+            return {'income_level': d.bracket, 'marginal_rate': d[rate_key] / 100}
+        })
+
+        return deduction, brackets
+    }
+    
+    apply_tax_brackets(income, brackets) {
+        var taxes = 0;
+        _.each(brackets, (bracket, i) => {
+            if (income == 0) {
+                return;
+            }
+            if (i < brackets.length - 1) {
+                var next_bracket_income = brackets[i + 1].income_level
+                var income_level_band = next_bracket_income - bracket.income_level
+                var portion = _.min([income, income_level_band])
+            } else {
+                portion = income
+            }
+            taxes += portion * bracket['marginal_rate']
+            income -= portion
+        })
+        // if there is income left over after exhausting all brackets
+        // tax remainder at highest bracket
+        if (income){
+            taxes += income * brackets[-1].marginal_rate
+        }
+        return _.max([0, taxes])
+    }
+
+    calculate_income_taxes(year, gains = null){
+        var f = this.filings[year];
+
+        var standard_state_deduction, state_brackets = this.get_tax_info(year, f.filing_state, f.filing_status);
+        var standard_federal_deduction, federal_brackets = this.get_tax_info(year, 'federal', f.filing_status);
+
+        // apply custom deductions if available
+        var federal_deduction = f.get("federal_deduction") || standard_federal_deduction;
+        var state_deduction = f.get("state_deduction") || standard_state_deduction;
+
+        var agi_deducted_fed = f.agi - federal_deduction;
+        var agi_deducted_state = f.agi - state_deduction;
+        
+        var federal = this.apply_tax_brackets(agi_deducted_fed, federal_brackets);
+        var state = this.apply_tax_brackets(agi_deducted_state, state_brackets);
+
+        if (gains != null){
+            var federal_with_gains = this.apply_tax_brackets(agi_deducted_fed + gains, federal_brackets);
+            var state_with_gains = this.apply_tax_brackets(agi_deducted_state + gains, state_brackets);
+            federal = federal_with_gains - federal;
+            state = state_with_gains - state;
+        }
+        return {
+            'federal': federal,
+            'state': state
         }
     }
 
-
-};
-
-var filings = {
-    2019: {
-        "gross_income": 126_730.64,
-        "withholdings": (6_000 + 2_395.91 + 23),
-        "filing_state": "georgia",
-        "filing_status": "single",
-        "federal_deduction": null,
-        "state_deduction": null
-    }, 
-    2020: {
-        "gross_income": 127_200,
-        "withholdings": (18_000 + 2_500 + 22),
-        "filing_state": "georgia",
-        "filing_status": "single"
-    },
-    2021: {
-        "gross_income": 130_800,
-        "withholdings": (18_000 + 2_500 + 22),
-        "filing_state": "georgia",
-        "filing_status": "single"
+    calculate_capital_gains_taxes(year) {
+        var f = this.filings[year];
+        var lifecycles = this.group_lifecycles((x) => {return x.sale.date.year})[year];
+        var short_gains, long_gains = (0, 0);
+        _.each(lifecycles, (l) => {
+            // ISO requirements to qualify for long term cap gains
+            const granted_two_years_ago = (l.sale.date - l.option.date).days >= 730;
+            const exercised_one_year_ago = (l.sale.date - l.stock.date).days >= 365;
+            const stock_basis = l.stock.price * l.stock.units;
+            const stock_sale = l.sale.price * l.sale.units;
+            if (granted_two_years_ago && exercised_one_year_ago){
+                long_gains += stock_sale - stock_basis;
+            } else {
+                short_gains += stock_sale - stock_basis;
+            }
+        })
+           
+        var taxes = this.calculate_income_taxes(year, short_gains);
+        var _, cap_gains_brackets = this.get_tax_info(year, 'federal', f.filing_status, true);
+        taxes.capital_gains = this.apply_tax_brackets(long_gains, cap_gains_brackets);
+        
+        return taxes
     }
+
+    group_lifecycles(by){
+        var grouped = {};
+        _.forEach(this.lifecycles, (l) => {
+            _.get(grouped, by(l), []).push(l);
+        })      
+        return grouped
+    }
+        
+    calculate_amt_taxes(year) {
+        const amt_exemption = 72_900;
+        const amt_tax_rate = 0.26;
+        
+        var lifecycles = this.group_lifecycles((l) => { return _.get(l, 'stock') ? l.stock.date.year : undefined; })[year];
+        var exercised = _.each(lifecycles, (l) => { if (l.stock != null) {return l}});
+        var exercise_spread = _.sum(_.each(exercised, (l) => { 
+            return (l.stock.fmv * l.stock.units) - (l.option.units * l.option.price) 
+        }))
+
+        const amt_base = this.filings[year].agi + exercise_spread - amt_exemption;
+        const tmt = amt_base * amt_tax_rate
+        const income_taxes = this.calculate_income_taxes(year)
+        const amt_tax = _.max([0, tmt - income_taxes.federal])
+
+        return _.max([0, amt_tax])
+    }
+       
+
 };
 
-var p = new Portfolio(filings, 13_000);
-p.grant_options_from_schedule('JEFF', 2.18, 8000, DateTime.utc(2019, 1, 30), DateTime.utc(2020, 1, 30));
-p.grant_options_from_schedule('JEFF', 3.08, 5000, DateTime.utc(2020, 6, 1), null);
-console.log(p._events);
+function run() {
+    var filings = {
+        2019: {
+            "gross_income": 126_730.64,
+            "withholdings": (6_000 + 2_395.91 + 23),
+            "filing_state": "georgia",
+            "filing_status": "single",
+            "federal_deduction": null,
+            "state_deduction": null
+        }, 
+        2020: {
+            "gross_income": 127_200,
+            "withholdings": (18_000 + 2_500 + 22),
+            "filing_state": "georgia",
+            "filing_status": "single"
+        },
+        2021: {
+            "gross_income": 130_800,
+            "withholdings": (18_000 + 2_500 + 22),
+            "filing_state": "georgia",
+            "filing_status": "single"
+        }
+    };
+    
+    var p = new Portfolio(filings, 13_000);
+    p.grant_options_from_schedule('JEFF', 2.18, 8000, DateTime.utc(2019, 1, 30), DateTime.utc(2020, 1, 30));
+    p.grant_options_from_schedule('JEFF', 3.08, 5000, DateTime.utc(2020, 6, 1), null);
+    p.evolve_asset('exercise options', 'JEFF', 2400, DateTime.utc(2020, 12, 30), 15);
+    p.evolve_asset('exercise options', 'JEFF', 10000, DateTime.utc(2021, 1, 31), 16.57);
+    p.evolve_asset('sell stocks', 'JEFF', 1000, 50);
+    console.log(p.events);
+    console.log([p.calculate_amt_taxes(2021), p.calculate_capital_gains_taxes(2021)]);
+}
+
+run();  
+
