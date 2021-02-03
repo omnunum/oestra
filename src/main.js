@@ -1,4 +1,4 @@
-var _ = require('lodash');
+import { cloneDeep, min, max, map, each, forEach, get, sum } from 'lodash';
 var superagent = require('superagent');
 import { DateTime, Duration } from 'luxon';
 import { createApp } from 'vue'
@@ -60,7 +60,7 @@ let Portfolio = class {
         this.lifecycles.push(lifecycle);
     }
 
-    grant_options_from_schedule(ticker, price, units, begin_date, cliff_date, cutoff_date, num_months=48) {
+    grant_options_from_schedule(ticker, price, units, begin_date, cliff_date, cutoff_date=DateTime.utc(), num_months=48) {
         if (cliff_date) {
             if (cutoff_date < cliff_date) { return null; }
             else if (cliff_date != begin_date) {
@@ -97,8 +97,8 @@ let Portfolio = class {
 
     split_lifecycle(l, units) {
         // part to leave unsold
-        let resized = _.cloneDeep(l);
-        let remainder = _.cloneDeep(l);
+        let resized = cloneDeep(l);
+        let remainder = cloneDeep(l);
         let base_units = l.option.units
         resized.option.units = units
         remainder.option.units = base_units - units
@@ -106,7 +106,7 @@ let Portfolio = class {
             resized.stock.units = units
             remainder.stock.units = base_units - units
         }
-        return resized, remainder
+        return [resized, remainder]
     }
 
     evolve_asset(event, ticker, units, date=null, fmv=null, price=null, optimize='date') {
@@ -114,10 +114,10 @@ let Portfolio = class {
 
         switch (event) {
             case 'sell stocks':
-                var source, destination = ('stock', 'sale');
+                var [source, destination]  = ['stock', 'sale'];
                 break;
             case 'exercise options':
-                source, destination = ('option', 'stock');
+                [source, destination] = ['option', 'stock'];  
                 break;
             default:
                 throw `${event} is not a valid event`;
@@ -132,10 +132,10 @@ let Portfolio = class {
 
         switch (optimize) {
             case 'date':
-                evolvable = evolvable.sort((a, b) => a[1][source].date - b[1][source].date);
+                evolvable = evolvable.sort((a, b) => a[source].date - b[source].date);
                 break;
             case 'price':
-                evolvable = evolvable.sort((a, b) => b[1][source].price - a[1][source].price);
+                evolvable = evolvable.sort((a, b) => b[source].price - a[source].price);
                 break;
         }
 
@@ -148,7 +148,7 @@ let Portfolio = class {
             // if the current stock cant be exercised whole, split lifecycle 
             // into two and exercise just one of them
             } else {
-                var resized, remainder = this.split_lifecycle(l, units);
+                var [resized, remainder] = this.split_lifecycle(l, units);
                 this.lifecycles.splice(i + 1, 0, remainder);
 
                 let destination_price = event == 'sell stocks' ? price : s.price;
@@ -156,30 +156,32 @@ let Portfolio = class {
                 this.lifecycles[i] = resized;
                 units = 0;
             }
-            this._events.push(Event(event, ticker, s/price, s.units, date, fmv));
+            this._events.push(new Event(event, ticker, s/price, s.units, date, fmv));
             // leave loop if we've exhausted all units
             if (!units){ break; }
         } 
 
     }
 
-    get_tax_info(year, region, status, capital_gains = false) {
+    async get_tax_info(year, region, status, capital_gains = false) {
         if (capital_gains && region != 'federal') {
             throw new Error('can only apply capital gains rate to `federal` region');
         }
         let normalized_region = region.toLowerCase().replace(' ', '_');
-        year = _.min(year, 2020);
+        year = min([year, 2020]);
         let url = (
             "https://raw.githubusercontent.com/taxee/taxee-tax-statistics" +
             `/master/src/statistics/${year}/${normalized_region}.json`
         )
-        var res;
-        superagent.get(url).end((e, r) => {
-            if (e || r.status == 404) {
-                throw new Error(`${region} is not a valid region`);
-            }
-            res = JSON.parse(r.body);
-        })
+        var res = await superagent.get(url);
+        // .end((e, r) => {
+        //     if (e || r.status == 404) {
+        //         throw new Error(`${region} is not a valid region`);
+        //     }
+        //     console.log(JSON.parse(r.text));
+        //     res = JSON.parse(r.text);
+        // })
+        res = JSON.parse(res.text);
         if (region == 'federal') {
             var data = res.tax_withholding_percentage_method_tables.annual[status];
         } else {
@@ -188,23 +190,23 @@ let Portfolio = class {
         let deduction = data.deductions[0].deduction_amount;
         let rate_key = capital_gains ? 'marginal_capital_gain_rate' : 'marginal_rate';
         let brackets = data.income_tax_brackets;
-        brackets = _.map(brackets, (d) => {
+        brackets = map(brackets, (d) => {
             return {'income_level': d.bracket, 'marginal_rate': d[rate_key] / 100}
         })
 
-        return deduction, brackets
+        return [deduction, brackets]
     }
     
     apply_tax_brackets(income, brackets) {
         var taxes = 0;
-        _.each(brackets, (bracket, i) => {
+        each(brackets, (bracket, i) => {
             if (income == 0) {
                 return;
             }
             if (i < brackets.length - 1) {
                 var next_bracket_income = brackets[i + 1].income_level
                 var income_level_band = next_bracket_income - bracket.income_level
-                var portion = _.min([income, income_level_band])
+                var portion = min([income, income_level_band])
             } else {
                 portion = income
             }
@@ -216,7 +218,7 @@ let Portfolio = class {
         if (income){
             taxes += income * brackets[-1].marginal_rate
         }
-        return _.max([0, taxes])
+        return max([0, taxes])
     }
 
     calculate_income_taxes(year, gains = null){
@@ -226,8 +228,8 @@ let Portfolio = class {
         var standard_federal_deduction, federal_brackets = this.get_tax_info(year, 'federal', f.filing_status);
 
         // apply custom deductions if available
-        var federal_deduction = f.get("federal_deduction") || standard_federal_deduction;
-        var state_deduction = f.get("state_deduction") || standard_state_deduction;
+        var federal_deduction = get(f, "federal_deduction") || standard_federal_deduction;
+        var state_deduction = get(f, "state_deduction") || standard_state_deduction;
 
         var agi_deducted_fed = f.agi - federal_deduction;
         var agi_deducted_state = f.agi - state_deduction;
@@ -249,9 +251,9 @@ let Portfolio = class {
 
     calculate_capital_gains_taxes(year) {
         var f = this.filings[year];
-        var lifecycles = this.group_lifecycles((x) => {return x.sale.date.year})[year];
-        var short_gains, long_gains = (0, 0);
-        _.each(lifecycles, (l) => {
+        var lifecycles = this.group_lifecycles((l) => { return get(l, 'sale') ? l.sale.date.year : undefined; })[year];
+        var [short_gains, long_gains] = (0, 0);
+        each(lifecycles, (l) => {
             // ISO requirements to qualify for long term cap gains
             const granted_two_years_ago = (l.sale.date - l.option.date).days >= 730;
             const exercised_one_year_ago = (l.sale.date - l.stock.date).days >= 365;
@@ -265,16 +267,16 @@ let Portfolio = class {
         })
            
         var taxes = this.calculate_income_taxes(year, short_gains);
-        var _, cap_gains_brackets = this.get_tax_info(year, 'federal', f.filing_status, true);
-        taxes.capital_gains = this.apply_tax_brackets(long_gains, cap_gains_brackets);
+        var cap_gains_info = this.get_tax_info(year, 'federal', f.filing_status, true);
+        taxes.capital_gains = this.apply_tax_brackets(long_gains, cap_gains_info[1]);
         
         return taxes
     }
 
     group_lifecycles(by){
         var grouped = {};
-        _.forEach(this.lifecycles, (l) => {
-            _.get(grouped, by(l), []).push(l);
+        forEach(this.lifecycles, (l) => {
+            get(grouped, by(l), []).push(l);
         })      
         return grouped
     }
@@ -283,18 +285,18 @@ let Portfolio = class {
         const amt_exemption = 72_900;
         const amt_tax_rate = 0.26;
         
-        var lifecycles = this.group_lifecycles((l) => { return _.get(l, 'stock') ? l.stock.date.year : undefined; })[year];
-        var exercised = _.each(lifecycles, (l) => { if (l.stock != null) {return l}});
-        var exercise_spread = _.sum(_.each(exercised, (l) => { 
+        var lifecycles = this.group_lifecycles((l) => { return get(l, 'stock') ? l.stock.date.year : undefined; })[year];
+        var exercised = each(lifecycles, (l) => { if (l.stock != null) {return l}});
+        var exercise_spread = sum(each(exercised, (l) => { 
             return (l.stock.fmv * l.stock.units) - (l.option.units * l.option.price) 
         }))
 
         const amt_base = this.filings[year].agi + exercise_spread - amt_exemption;
         const tmt = amt_base * amt_tax_rate
         const income_taxes = this.calculate_income_taxes(year)
-        const amt_tax = _.max([0, tmt - income_taxes.federal])
+        const amt_tax = max([0, tmt - income_taxes.federal])
 
-        return _.max([0, amt_tax])
+        return max([0, amt_tax])
     }
        
 
@@ -328,7 +330,7 @@ function run() {
     p.grant_options_from_schedule('JEFF', 2.18, 8000, DateTime.utc(2019, 1, 30), DateTime.utc(2020, 1, 30));
     p.grant_options_from_schedule('JEFF', 3.08, 5000, DateTime.utc(2020, 6, 1), null);
     p.evolve_asset('exercise options', 'JEFF', 2400, DateTime.utc(2020, 12, 30), 15);
-    p.evolve_asset('exercise options', 'JEFF', 10000, DateTime.utc(2021, 1, 31), 16.57);
+    p.evolve_asset('exercise options', 'JEFF', 1600, DateTime.utc(2021, 1, 31), 16.57);
     p.evolve_asset('sell stocks', 'JEFF', 1000, 50);
     console.log(p.events);
     console.log([p.calculate_amt_taxes(2021), p.calculate_capital_gains_taxes(2021)]);
