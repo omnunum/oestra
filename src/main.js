@@ -1,4 +1,4 @@
-import { cloneDeep, min, max, map, each, forEach, get, sum } from 'lodash';
+import { cloneDeep, min, max, map, each, get, sum, groupBy, merge,  toPairs, flatMap} from 'lodash';
 var superagent = require('superagent');
 import { DateTime, Duration } from 'luxon';
 import { createApp } from 'vue'
@@ -37,8 +37,9 @@ let Event = class {
 };
 
 let Portfolio = class {
-    constructor(filings, initial_cash) {
-        this.cash = initial_cash
+    constructor(tax_info, filings, initial_cash) {
+        this.tax_info = tax_info;
+        this.cash = initial_cash;
 
         Object.values(filings).forEach(
             (filing) => filing.agi = (filing.gross_income - filing.withholdings || 0)
@@ -50,6 +51,14 @@ let Portfolio = class {
 
     get events() {
         return this._events.sort((a, b) => a.date - b.date);
+    }
+
+    get_tax_info(year, region, status, capital_gains = null){
+        const key = capital_gains ? 'cap_gains' : 'income';
+        const deduction = this.tax_info[year][region].deduction
+        const brackets = this.tax_info[year][region].brackets[key]
+
+        return deduction, brackets
     }
 
     grant_option(ticker, price, units, date) {
@@ -149,7 +158,7 @@ let Portfolio = class {
             // into two and exercise just one of them
             } else {
                 var [resized, remainder] = this.split_lifecycle(l, units);
-                this.lifecycles.splice(i + 1, 0, remainder);
+                this.lifecycles.push(remainder);
 
                 let destination_price = event == 'sell stocks' ? price : s.price;
                 resized[destination] = new Asset(destination_price, units, date, fmv);
@@ -162,40 +171,6 @@ let Portfolio = class {
         } 
 
     }
-
-    async get_tax_info(year, region, status, capital_gains = false) {
-        if (capital_gains && region != 'federal') {
-            throw new Error('can only apply capital gains rate to `federal` region');
-        }
-        let normalized_region = region.toLowerCase().replace(' ', '_');
-        year = min([year, 2020]);
-        let url = (
-            "https://raw.githubusercontent.com/taxee/taxee-tax-statistics" +
-            `/master/src/statistics/${year}/${normalized_region}.json`
-        )
-        var res = await superagent.get(url);
-        // .end((e, r) => {
-        //     if (e || r.status == 404) {
-        //         throw new Error(`${region} is not a valid region`);
-        //     }
-        //     console.log(JSON.parse(r.text));
-        //     res = JSON.parse(r.text);
-        // })
-        res = JSON.parse(res.text);
-        if (region == 'federal') {
-            var data = res.tax_withholding_percentage_method_tables.annual[status];
-        } else {
-            data = res[status];
-        }
-        let deduction = data.deductions[0].deduction_amount;
-        let rate_key = capital_gains ? 'marginal_capital_gain_rate' : 'marginal_rate';
-        let brackets = data.income_tax_brackets;
-        brackets = map(brackets, (d) => {
-            return {'income_level': d.bracket, 'marginal_rate': d[rate_key] / 100}
-        })
-
-        return [deduction, brackets]
-    }
     
     apply_tax_brackets(income, brackets) {
         var taxes = 0;
@@ -203,10 +178,12 @@ let Portfolio = class {
             if (income == 0) {
                 return;
             }
+            // if we have yet to hit the last bracket
             if (i < brackets.length - 1) {
                 var next_bracket_income = brackets[i + 1].income_level
                 var income_level_band = next_bracket_income - bracket.income_level
                 var portion = min([income, income_level_band])
+            // otherwise the rest of the income will be taxed at this last bracket
             } else {
                 portion = income
             }
@@ -251,8 +228,12 @@ let Portfolio = class {
 
     calculate_capital_gains_taxes(year) {
         var f = this.filings[year];
-        var lifecycles = this.group_lifecycles((l) => { return get(l, 'sale') ? l.sale.date.year : undefined; })[year];
-        var [short_gains, long_gains] = (0, 0);
+
+        var lifecycles = groupBy(this.lifecycles, (l) => { 
+            return get(l, 'sale') ? l.sale.date.year : undefined; 
+        })[year];
+
+        var [short_gains, long_gains] = [0, 0];
         each(lifecycles, (l) => {
             // ISO requirements to qualify for long term cap gains
             const granted_two_years_ago = (l.sale.date - l.option.date).days >= 730;
@@ -272,20 +253,15 @@ let Portfolio = class {
         
         return taxes
     }
-
-    group_lifecycles(by){
-        var grouped = {};
-        forEach(this.lifecycles, (l) => {
-            get(grouped, by(l), []).push(l);
-        })      
-        return grouped
-    }
         
     calculate_amt_taxes(year) {
         const amt_exemption = 72_900;
         const amt_tax_rate = 0.26;
         
-        var lifecycles = this.group_lifecycles((l) => { return get(l, 'stock') ? l.stock.date.year : undefined; })[year];
+        var lifecycles = groupBy(this.lifecycles, (l) => { 
+            return get(l, 'stock') ? l.stock.date.year : undefined; 
+        })[year];
+
         var exercised = each(lifecycles, (l) => { if (l.stock != null) {return l}});
         var exercise_spread = sum(each(exercised, (l) => { 
             return (l.stock.fmv * l.stock.units) - (l.option.units * l.option.price) 
@@ -302,39 +278,113 @@ let Portfolio = class {
 
 };
 
-function run() {
-    var filings = {
-        2019: {
-            "gross_income": 126_730.64,
-            "withholdings": (6_000 + 2_395.91 + 23),
-            "filing_state": "georgia",
-            "filing_status": "single",
-            "federal_deduction": null,
-            "state_deduction": null
-        }, 
-        2020: {
-            "gross_income": 127_200,
-            "withholdings": (18_000 + 2_500 + 22),
-            "filing_state": "georgia",
-            "filing_status": "single"
-        },
-        2021: {
-            "gross_income": 130_800,
-            "withholdings": (18_000 + 2_500 + 22),
-            "filing_state": "georgia",
-            "filing_status": "single"
+
+async function fetch_tax_info(year, region, status) {
+    const normalized_region = region.toLowerCase().replace(' ', '_');
+    const url = (
+        "https://raw.githubusercontent.com/taxee/taxee-tax-statistics" +
+        `/master/src/statistics/${min([year, 2020])}/${normalized_region}.json`
+    )
+    return superagent.get(url).then((res) => {
+        const raw_info = JSON.parse(res.text)
+        const data = (region == 'federal') ? raw_info.tax_withholding_percentage_method_tables.annual[status] : raw_info[status];
+        const deduction = data.deductions[0].deduction_amount;
+        const income_brackets = map(data.income_tax_brackets, (d) => {
+            return {'income_level': d.bracket, 'marginal_rate': d.marginal_rate / 100}
+        })
+        var cap_gains_brackets;
+        if (region == 'federal') {
+            cap_gains_brackets = map(data.income_tax_brackets, (d) => {
+                return {'income_level': d.bracket, 'marginal_rate': d.marginal_capital_gain_rate / 100}
+            })
         }
-    };
+        const info =  {
+            [region]: {
+                'deduction': deduction,
+                'brackets': {
+                    'income': income_brackets,
+                    'cap_gains': cap_gains_brackets
+                }
+            }
+        }
+        return [year, info]
+    }).catch((err) => {
+        throw err
+        // throw new Error(`"${region}" is not a valid region or ${year} is not a valid year`);
+    })
+}
+
+async function cached_tax_info(filings, tax_info) {
+    const tups = flatMap(toPairs(filings), ([year, filing]) => {
+        const state = {
+            year: year, 
+            region: filing.filing_state,
+            status: filing.filing_status
+        };
+        // make sure to also grab the federal version of any year listed
+        const federal = {
+            year: year, 
+            region: 'federal', 
+            status: filing.filing_status
+        };
+        return [state, federal]
+    })
+    const promises = []
     
-    var p = new Portfolio(filings, 13_000);
+    each(tups, (t) => {
+        let key = `${t.year}.${t.region}`;
+        if (get(tax_info, key) == undefined){
+            promises.push(fetch_tax_info(t.year, t.region, t.status));
+        }
+    });
+    const tax_info_raw = await Promise.all(promises);
+    each(tax_info_raw, (v) => {
+        tax_info[v[0]] = merge(get(tax_info, v[0], {}), v[1])
+    })
+    return tax_info;
+}
+
+async function run(filings, tax_info) {
+    tax_info = await cached_tax_info(filings, tax_info);  
+    tax_info = await cached_tax_info(filings, tax_info); 
+    var p = new Portfolio(tax_info, filings, 13_000);
     p.grant_options_from_schedule('JEFF', 2.18, 8000, DateTime.utc(2019, 1, 30), DateTime.utc(2020, 1, 30));
     p.grant_options_from_schedule('JEFF', 3.08, 5000, DateTime.utc(2020, 6, 1), null);
     p.evolve_asset('exercise options', 'JEFF', 2400, DateTime.utc(2020, 12, 30), 15);
     p.evolve_asset('exercise options', 'JEFF', 1600, DateTime.utc(2021, 1, 31), 16.57);
     p.evolve_asset('sell stocks', 'JEFF', 1000, 50);
-    console.log(p.events);
-    console.log([p.calculate_amt_taxes(2021), p.calculate_capital_gains_taxes(2021)]);
+    return p
 }
 
-run();  
+var filings = {
+    2019: {
+        "gross_income": 126_730.64,
+        "withholdings": (6_000 + 2_395.91 + 23),
+        "filing_state": "georgia",
+        "filing_status": "single",
+        "federal_deduction": null,
+        "state_deduction": null
+    }, 
+    2020: {
+        "gross_income": 127_200,
+        "withholdings": (18_000 + 2_500 + 22),
+        "filing_state": "georgia",
+        "filing_status": "single"
+    },
+    2021: {
+        "gross_income": 130_800,
+        "withholdings": (18_000 + 2_500 + 22),
+        "filing_state": "georgia",
+        "filing_status": "single"
+    }
+};
+
+var tax_info = {};
+
+
+run(filings, tax_info).then((p) => {
+    console.log(p.events);
+    console.log([p.calculate_amt_taxes(2021), p.calculate_capital_gains_taxes(2021)]);
+}); 
+
 
