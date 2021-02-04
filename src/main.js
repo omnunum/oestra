@@ -17,11 +17,12 @@ let Asset = class {
 };
 
 let Lifecycle = class {
-    constructor(ticker, option, stock, sale) {
+    constructor(ticker, option, stock, sale, date) {
         this.ticker = ticker;
         this.option = option;
         this.stock = stock;
         this.sale = sale;
+        this.date = date;
     }
 };
 
@@ -46,11 +47,15 @@ let Portfolio = class {
         )
         this.filings = filings;
         this._events = [];
-        this.lifecycles = [];
+        this._lifecycles = [];
     }
 
     get events() {
         return this._events.sort((a, b) => a.date - b.date);
+    }
+
+    get lifecycles() {
+        return this._lifecycles.sort((a, b) => a.date - b.date);
     }
 
     get_tax_info(year, region, status, capital_gains = null){
@@ -58,7 +63,7 @@ let Portfolio = class {
         const deduction = this.tax_info[year][region].deduction
         const brackets = this.tax_info[year][region].brackets[key]
 
-        return deduction, brackets
+        return [deduction, brackets]
     }
 
     grant_option(ticker, price, units, date) {
@@ -66,7 +71,7 @@ let Portfolio = class {
         this._events.push(event);
         var option = new Asset(price, units, date);
         var lifecycle = new Lifecycle(ticker, option);
-        this.lifecycles.push(lifecycle);
+        this._lifecycles.push(lifecycle);
     }
 
     grant_options_from_schedule(ticker, price, units, begin_date, cliff_date, cutoff_date=DateTime.utc(), num_months=48) {
@@ -118,7 +123,7 @@ let Portfolio = class {
         return [resized, remainder]
     }
 
-    evolve_asset(event, ticker, units, date=null, fmv=null, price=null, optimize='date') {
+    evolve_asset(event, ticker, units, date=null, price=null, fmv=null, optimize='date') {
         date = date || DateTime.utc();
 
         switch (event) {
@@ -132,37 +137,39 @@ let Portfolio = class {
                 throw `${event} is not a valid event`;
         }
 
-        let evolvable = [];
-        for (const [i, l] of this.lifecycles.entries()) {
-            if (l.ticker == ticker && l[destination] == null && l[source] != null) {
-                evolvable.push((i, l))
+        var evolvable = [];
+        for (const [i, l] of this._lifecycles.entries()) {
+            if (l.ticker == ticker && l[destination] == undefined && l[source] != undefined) {
+                evolvable.push([i, l])
             }
         }
 
         switch (optimize) {
             case 'date':
-                evolvable = evolvable.sort((a, b) => a[source].date - b[source].date);
+                evolvable = evolvable.sort((a, b) => a[1][source].date - b[1][source].date);
                 break;
             case 'price':
-                evolvable = evolvable.sort((a, b) => b[source].price - a[source].price);
+                evolvable = evolvable.sort((a, b) => b[1][source].price - a[1][source].price);
                 break;
         }
 
-        for (const [i, l] of evolvable.entries()) {
-            let s = l[source];
-            // if the current option grant can be exercised in whole
+        for (var [i, l] of evolvable) {
+            var s = l[source];
+            // if the current cycle can be evolved whole
             if (s.units <= units) {
-                this.lifecycles[i][destination] = new Asset(s.price, s.units, date, fmv);
+                this._lifecycles[i][destination] = new Asset(s.price, s.units, date, fmv);
+                this._lifecycles[i].date = date;
                 units -= s.units;
-            // if the current stock cant be exercised whole, split lifecycle 
-            // into two and exercise just one of them
+            // if the current cycle cant be evolved whole, split 
+            // into two and evolve just one of them
             } else {
-                var [resized, remainder] = this.split_lifecycle(l, units);
-                this.lifecycles.push(remainder);
+                l.date = date;
+                const [resized, remainder] = this.split_lifecycle(l, units);
+                this._lifecycles.push(remainder);
 
-                let destination_price = event == 'sell stocks' ? price : s.price;
+                const destination_price = event == 'sell stocks' ? price : s.price;
                 resized[destination] = new Asset(destination_price, units, date, fmv);
-                this.lifecycles[i] = resized;
+                this._lifecycles[i] = resized;
                 units = 0;
             }
             this._events.push(new Event(event, ticker, s/price, s.units, date, fmv));
@@ -201,12 +208,12 @@ let Portfolio = class {
     calculate_income_taxes(year, gains = null){
         var f = this.filings[year];
 
-        var standard_state_deduction, state_brackets = this.get_tax_info(year, f.filing_state, f.filing_status);
-        var standard_federal_deduction, federal_brackets = this.get_tax_info(year, 'federal', f.filing_status);
+        var [standard_state_deduction, state_brackets] = this.get_tax_info(year, f.filing_state, f.filing_status);
+        var [standard_federal_deduction, federal_brackets] = this.get_tax_info(year, 'federal', f.filing_status);
 
         // apply custom deductions if available
-        var federal_deduction = get(f, "federal_deduction") || standard_federal_deduction;
-        var state_deduction = get(f, "state_deduction") || standard_state_deduction;
+        var federal_deduction = get(f, "federal_deduction", standard_federal_deduction);
+        var state_deduction = get(f, "state_deduction", standard_state_deduction);
 
         var agi_deducted_fed = f.agi - federal_deduction;
         var agi_deducted_state = f.agi - state_deduction;
@@ -229,7 +236,7 @@ let Portfolio = class {
     calculate_capital_gains_taxes(year) {
         var f = this.filings[year];
 
-        var lifecycles = groupBy(this.lifecycles, (l) => { 
+        var lifecycles = groupBy(this._lifecycles, (l) => { 
             return get(l, 'sale') ? l.sale.date.year : undefined; 
         })[year];
 
@@ -258,7 +265,7 @@ let Portfolio = class {
         const amt_exemption = 72_900;
         const amt_tax_rate = 0.26;
         
-        var lifecycles = groupBy(this.lifecycles, (l) => { 
+        var lifecycles = groupBy(this._lifecycles, (l) => { 
             return get(l, 'stock') ? l.stock.date.year : undefined; 
         })[year];
 
@@ -350,9 +357,9 @@ async function run(filings, tax_info) {
     var p = new Portfolio(tax_info, filings, 13_000);
     p.grant_options_from_schedule('JEFF', 2.18, 8000, DateTime.utc(2019, 1, 30), DateTime.utc(2020, 1, 30));
     p.grant_options_from_schedule('JEFF', 3.08, 5000, DateTime.utc(2020, 6, 1), null);
-    p.evolve_asset('exercise options', 'JEFF', 2400, DateTime.utc(2020, 12, 30), 15);
-    p.evolve_asset('exercise options', 'JEFF', 1600, DateTime.utc(2021, 1, 31), 16.57);
-    p.evolve_asset('sell stocks', 'JEFF', 1000, 50);
+    p.evolve_asset('exercise options', 'JEFF', 2400, DateTime.utc(2020, 12, 30), null, 15);
+    p.evolve_asset('exercise options', 'JEFF', 1600, DateTime.utc(2021, 1, 31), null, 16.57);
+    p.evolve_asset('sell stocks', 'JEFF', 1000, DateTime.utc(), 50);
     return p
 }
 
@@ -384,6 +391,7 @@ var tax_info = {};
 
 run(filings, tax_info).then((p) => {
     console.log(p.events);
+    console.log(p.lifecycles);
     console.log([p.calculate_amt_taxes(2021), p.calculate_capital_gains_taxes(2021)]);
 }); 
 
