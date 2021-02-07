@@ -4,9 +4,6 @@ import { DateTime, Duration } from 'luxon';
 import { createApp } from 'vue'
 import App from './App.vue'
 
-createApp(App).mount('#app') 
-
-
 let Asset = class {
     constructor(price, units, date, fmv) {
         this.price = price;
@@ -351,7 +348,7 @@ async function cached_tax_info(filings, tax_info) {
     return tax_info;
 }
 
-async function run(filings, tax_info) {
+export async function run(filings, tax_info) {
     tax_info = await cached_tax_info(filings, tax_info);  
     tax_info = await cached_tax_info(filings, tax_info); 
     var p = new Portfolio(tax_info, filings, 13_000);
@@ -363,36 +360,13 @@ async function run(filings, tax_info) {
     return p
 }
 
-var filings = {
-    2019: {
-        "gross_income": 126_730.64,
-        "withholdings": (6_000 + 2_395.91 + 23),
-        "filing_state": "georgia",
-        "filing_status": "single",
-        "federal_deduction": null,
-        "state_deduction": null
-    }, 
-    2020: {
-        "gross_income": 127_200,
-        "withholdings": (18_000 + 2_500 + 22),
-        "filing_state": "georgia",
-        "filing_status": "single"
-    },
-    2021: {
-        "gross_income": 130_800,
-        "withholdings": (18_000 + 2_500 + 22),
-        "filing_state": "georgia",
-        "filing_status": "single"
-    }
-};
-
-var tax_info = {};
+export async function run_then_log(filings, tax_info) {
+    run(filings, tax_info).then((p) => {
+        console.log(p.events);
+        console.log(p.lifecycles);
+        console.log([p.calculate_amt_taxes(2021), p.calculate_capital_gains_taxes(2021)]);
+    }); 
+}
 
 
-run(filings, tax_info).then((p) => {
-    console.log(p.events);
-    console.log(p.lifecycles);
-    console.log([p.calculate_amt_taxes(2021), p.calculate_capital_gains_taxes(2021)]);
-}); 
-
-
+createApp(App).mount('#app')
