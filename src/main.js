@@ -3,6 +3,7 @@ var superagent = require('superagent');
 import { DateTime, Duration } from 'luxon';
 import { createApp } from 'vue'
 import App from './App.vue'
+import router from './router'
 
 let Asset = class {
     constructor(price, units, date, fmv) {
@@ -369,4 +370,4 @@ export async function run_then_log(filings, tax_info) {
 }
 
 
-createApp(App).mount('#app')
+createApp(App).use(router).mount('#app')
