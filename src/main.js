@@ -77,9 +77,9 @@ let Portfolio = class {
         if (cliffDate) {
             if (cutoffDate < cliffDate) { return null; }
             else if (cliffDate != beginDate) {
-                let froYear = (cliffDate.year - beginDate.year) * 12;
+                let fromYear = (cliffDate.year - beginDate.year) * 12;
                 let fromMonths = (cliffDate.month - beginDate.month);
-                let monthsVestedAtCliff = froYear + fromMonths;
+                let monthsVestedAtCliff = fromYear + fromMonths;
                 let cliffUnits = Math.floor((units / numMonths) * monthsVestedAtCliff);
                 this.grantOption(ticker, price, cliffUnits, cliffDate);
                 
