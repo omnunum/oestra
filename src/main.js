@@ -4,6 +4,7 @@ import { DateTime, Duration } from 'luxon';
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
+import Taxee from 'taxee-tax-statistics';
 
 let Asset = class {
     constructor(price, units, date, fmv) {
@@ -170,7 +171,7 @@ let Portfolio = class {
                 this._lifecycles[i] = resized;
                 units = 0;
             }
-            this._events.push(new Event(event, ticker, s/price, s.units, date, fmv));
+            this._events.push(new Event(event, ticker, s.price, s.units, date, fmv));
             // leave loop if we've exhausted all units
             if (!units){ break; }
         } 
