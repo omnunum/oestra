@@ -1,57 +1,31 @@
 <template id="filing">
-  <div>
-    <h1>{{ msg }}</h1>
-    <textarea id="filing-input" v-model="filings_text" />
-    <button id="filing-button-run" @click="run_then_log(filings, tax_info)" class="btn btn-primary"> Run me brah </button>
+  <div class="row">
+    <div class="col"><span>{{year}}</span> </div>
+    <div class="col"><input v-model.number="grossIncome" /> </div>
+    <div class="col"><input v-model.number="withholdings" /> </div>
+    <div class="col">
+      <select-states v-model="filingState" />
+    </div>
   </div>
 </template>
 
 <script>
-
-import {run_then_log} from '../main'
-
-var filings = {
-    2019: {
-        "gross_income": 126_730.64,
-        "withholdings": (6_000 + 2_395.91 + 23),
-        "filing_state": "georgia",
-        "filing_status": "single",
-        "federal_deduction": null,
-        "state_deduction": null
-    }, 
-    2020: {
-        "gross_income": 127_200,
-        "withholdings": (18_000 + 2_500 + 22),
-        "filing_state": "georgia",
-        "filing_status": "single"
-    },
-    2021: {
-        "gross_income": 130_800,
-        "withholdings": (18_000 + 2_500 + 22),
-        "filing_state": "georgia",
-        "filing_status": "single"
-    }
-};
-
-var tax_info = {};
-
+import SelectStates from '@/components/SelectStates.vue';
 
 export default {
   name: 'Filing',
   props: {
-    msg: String
+    year: Number,
+    filing: Object
   },
-  methods: {
-      run_then_log
+  components: {
+    SelectStates
   },
-  data() {
-    return {
-      filings, 
-      tax_info
+  data() { return {
+      grossIncome: this.grossIncome || this.filing.grossIncome, 
+      withholdings: this.withholdings || this.filing.withholdings, 
+      filingState: this.filingState || this.filing.filingState
     }
-  },
-  computed: {
-      filings_text() { return JSON.stringify(this.filings) }
   }
 }
 
