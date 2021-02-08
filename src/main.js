@@ -4,7 +4,7 @@ import { DateTime, Duration } from 'luxon';
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
-import Taxee from 'taxee-tax-statistics';
+// import Taxee from 'taxee-tax-statistics';
 
 let Asset = class {
     constructor(price, units, date, fmv) {
