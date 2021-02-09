@@ -1,6 +1,8 @@
 <template id="select-mapped">
   <select v-model="value">
-    <option v-for="item in items" :key=item.key :value=item.key>{{ item.display }}</option>
+    <option v-for="item in items" :key=item.key :value=item.key>
+      {{ item.display }}
+    </option>
   </select>
 </template>
 
