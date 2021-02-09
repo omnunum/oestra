@@ -1,10 +1,9 @@
 import { cloneDeep, min, max, map, each, get, sum, groupBy, merge,  toPairs, flatMap} from 'lodash';
-var superagent = require('superagent');
 import { DateTime, Duration } from 'luxon';
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
-// import Taxee from 'taxee-tax-statistics';
+import Taxee from 'taxee-tax-statistics';
 
 let Asset = class {
     constructor(price, units, date, fmv) {
@@ -286,38 +285,29 @@ let Portfolio = class {
 
 
 async function fetchTaxInfo(year, region, status) {
-    const normalizedRegion = region.toLowerCase().replace(' ', '_');
-    const url = (
-        "https://raw.githubusercontent.com/taxee/taxee-tax-statistics" +
-        `/master/src/statistics/${min([year, 2020])}/${normalizedRegion}.json`
-    )
-    return superagent.get(url).then((res) => {
-        const rawInfo = JSON.parse(res.text)
-        const data = (region == 'federal') ? rawInfo.taxWithholdingPercentageMethodTables.annual[status] : rawInfo[status];
-        const deduction = data.deductions[0].deductioAmount;
-        const incomeBrackets = map(data.incomeTaxBrackets, (d) => {
-            return {'incomeLevel': d.bracket, 'marginalRate': d.marginalRate / 100}
+    const rawInfo = Taxee[year][region];
+    const data = (region == 'federal') ? rawInfo.tax_withholding_percentage_method_tables.annual[status] : rawInfo[status];
+    const deduction = data.deductions[0].deductioAmount;
+    const incomeBrackets = map(data.income_tax_brackets, (d) => {
+        return {'incomeLevel': d.bracket, 'marginalRate': d.marginal_rate / 100}
+    })
+    var capGainsBrackets;
+    if (region == 'federal') {
+        capGainsBrackets = map(data.income_tax_brackets, (d) => {
+            return {'incomeLevel': d.bracket, 'marginalRate': d.marginal_capital_gain_rate / 100}
         })
-        var capGainsBrackets;
-        if (region == 'federal') {
-            capGainsBrackets = map(data.incomeTaxBrackets, (d) => {
-                return {'incomeLevel': d.bracket, 'marginalRate': d.marginalCapitalGainRate / 100}
-            })
-        }
-        const info =  {
-            [region]: {
-                'deduction': deduction,
-                'brackets': {
-                    'income': incomeBrackets,
-                    'capGains': capGainsBrackets
-                }
+    }
+    const info =  {
+        [region]: {
+            'deduction': deduction,
+            'brackets': {
+                'income': incomeBrackets,
+                'capGains': capGainsBrackets
             }
         }
-        return [year, info]
-    }).catch((err) => {
-        throw err
-        // throw new Error(`"${region}" is not a valid region or ${year} is not a valid year`);
-    })
+    }
+    return [year, info]
+
 }
 
 async function cachedTaxInfo(filings, taxInfo) {
@@ -351,8 +341,8 @@ async function cachedTaxInfo(filings, taxInfo) {
 }
 
 export async function run(filings, taxInfo) {
-    taxInfo = await cachedTaxInfo(filings, taxInfo);  
-    taxInfo = await cachedTaxInfo(filings, taxInfo); 
+    taxInfo = cachedTaxInfo(filings, taxInfo);  
+    taxInfo = cachedTaxInfo(filings, taxInfo); 
     var p = new Portfolio(taxInfo, filings, 13_000);
     p.grantOptionsFromSchedule('JEFF', 2.18, 8000, DateTime.utc(2019, 1, 30), DateTime.utc(2020, 1, 30));
     p.grantOptionsFromSchedule('JEFF', 3.08, 5000, DateTime.utc(2020, 6, 1), null);
@@ -362,7 +352,7 @@ export async function run(filings, taxInfo) {
     return p
 }
 
-export async function runThenLog(filings, taxInfo) {
+export function runThenLog(filings, taxInfo) {
     run(filings, taxInfo).then((p) => {
         console.log(p.events);
         console.log(p.lifecycles);
