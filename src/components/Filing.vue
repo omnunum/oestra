@@ -4,13 +4,24 @@
     <div class="col"><input v-model.number="grossIncome" /> </div>
     <div class="col"><input v-model.number="withholdings" /> </div>
     <div class="col">
-      <select-states v-model="filingState" />
+      <select-mapped 
+        v-model="filingState"
+        :keys="states"
+        :mapper="selectMapper" />
+    </div>
+    <div class="col">
+      <select-mapped 
+        v-model="filingStatus"
+        :keys="statuses"
+        :mapper="selectMapper" />
     </div>
   </div>
 </template>
 
 <script>
-import SelectStates from '@/components/SelectStates.vue';
+import SelectMapped from '@/components/SelectMapped.vue';
+import Taxee from 'taxee-tax-statistics';
+import { startCase } from 'lodash';
 
 export default {
   name: 'Filing',
@@ -19,13 +30,21 @@ export default {
     filing: Object
   },
   components: {
-    SelectStates
+    SelectMapped
   },
   data() { return {
       grossIncome: this.grossIncome || this.filing.grossIncome, 
       withholdings: this.withholdings || this.filing.withholdings, 
-      filingState: this.filingState || this.filing.filingState
+      filingState: this.filingState || this.filing.filingState,
+      filingStatus: this.filingStatus || this.filing.filingStatus,
     }
+  },
+  computed: {
+    states() { return Object.keys(Taxee[2020]).filter((f) => f != 'federal') },
+    statuses() { return Object.keys(Taxee[2020]['california']) }
+  },
+  methods: {
+    selectMapper(key) { return startCase(key.replace('_', ' ')).replace('Of', 'of') } 
   }
 }
 
