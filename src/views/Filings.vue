@@ -8,12 +8,9 @@
         <div class="col"><span>State</span></div>
         <div class="col"><span>Status</span></div>
     </div>
-    <Filing 
-      v-for="(filing, year) in filings" 
-      :key=year
-      :year=+year
-      :filing=filing
-    />
+    <div v-for="(filing, year) in p.filings" :key="year">
+        <Filing v-model="p.filings[year]" :year=+year />
+    </div>
     <button id="filings-button-add-future-year" @click="addYear(futureYear)">Add filing for {{ futureYear }}</button>
   </div>
 </template>
@@ -21,50 +18,25 @@
 <script>
 import Filing from '@/components/Filing.vue';
 
-var filings = {
-    2019: {
-        "grossIncome": 126_730.64,
-        "withholdings": (6_000 + 2_395.91 + 23),
-        "filingState": "georgia",
-        "filingStatus": "single"
-    }, 
-    2020: {
-        "grossIncome": 127_200,
-        "withholdings": (18_000 + 2_500 + 22),
-        "filingState": "georgia",
-        "filingStatus": "single"
-    },
-    2021: {
-        "grossIncome": 130_800,
-        "withholdings": (18_000 + 2_500 + 22),
-        "filingState": "georgia",
-        "filingStatus": "single"
-    }
-}
-
 export default {
   name: 'Filings',
   components: {
     Filing
   }, 
-  data() { 
-    return {
-       filings
-    }
-  },
+  inject: ['p'],
   computed: {
     years() {
-        let keys = Object.keys(this.filings);
-        keys.sort();
-        return keys;
+      let keys = Object.keys(this.p.filings);
+      keys.sort();
+      return keys;
     },
     pastYear() { return +this.years[0] - 1 },
-    futureYear() { return +this.years[this.years.length - 1] + 1},
+    futureYear() { return +this.years[this.years.length - 1] + 1}
   },
   methods: {
-      addYear(year) {
-          this.filings[+year] = {}
-      }
+    addYear(year) {
+      this.p.updateFiling(+year)
+    }
   }
 }
 </script>

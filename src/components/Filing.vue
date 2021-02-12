@@ -1,17 +1,17 @@
 <template id="filing">
   <div class="row">
     <div class="col"><span>{{year}}</span> </div>
-    <div class="col"><input v-model.number="grossIncome" /> </div>
-    <div class="col"><input v-model.number="withholdings" /> </div>
+    <div class="col"><input v-model.number="value.grossIncome" /> </div>
+    <div class="col"><input v-model.number="value.withholdings" /> </div>
     <div class="col">
       <select-mapped 
-        v-model="filingState"
+        v-model="value.filingState"
         :keys="states"
         :mapper="selectMapper" />
     </div>
     <div class="col">
       <select-mapped 
-        v-model="filingStatus"
+        v-model="value.filingStatus"
         :keys="statuses"
         :mapper="selectMapper" />
     </div>
@@ -27,24 +27,30 @@ export default {
   name: 'Filing',
   props: {
     year: Number,
-    filing: Object
+    modelValue: Object
   },
+  inject: ['p'],
   components: {
     SelectMapped
   },
-  data() { return {
-      grossIncome: this.grossIncome || this.filing.grossIncome, 
-      withholdings: this.withholdings || this.filing.withholdings, 
-      filingState: this.filingState || this.filing.filingState,
-      filingStatus: this.filingStatus || this.filing.filingStatus,
-    }
-  },
   computed: {
     states() { return Object.keys(Taxee[2020]).filter((f) => f != 'federal') },
-    statuses() { return Object.keys(Taxee[2020]['california']) }
+    statuses() { return Object.keys(Taxee[2020]['california']) },
+    value: {
+      get() { return this.modelValue },
+      set(v) { this.$emit('update:modelValue', v) }
+    }
   },
   methods: {
-    selectMapper(key) { return startCase(key.replace('_', ' ')).replace('Of', 'of') } 
+    selectMapper(key) { return startCase(key.replace('_', ' ')).replace('Of', 'of') },
+  },
+  watch: {
+    value: function(o,n) { 
+      if (n.grossIncome !== undefined && n.withholdings !== undefined) { 
+        n.agi = n.grossIncome - n.withholdings 
+      }
+      console.log(`changed ${n}`)
+    }
   }
 }
 
