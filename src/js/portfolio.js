@@ -51,19 +51,18 @@ export class Portfolio {
   }
 
   updateFiling(year, filing) {
-      if (filing === undefined) {
-          filing = {
-            "grossIncome": undefined,
-            "withholdings": undefined,
-            "filingState": undefined,
-            "filingStatus": undefined
-          }
-      }
-      console.log(`updated ${year} to`, filing);
-    //   filing.agi = (filing.grossIncome - filing.withholdings);
-      if (!isReactive(filing)) { filing = reactive(filing) }
-      this.filings[year] = filing;
-      console.log(this.filings)
+    filing = {
+        "grossIncome": 0,
+        "withholdings": 0,
+        "filingState": undefined,
+        "filingStatus": undefined,
+        ... filing
+    }
+    console.log(`updated ${year} to`, filing);
+    filing.agi = (filing.grossIncome - filing.withholdings) || undefined;
+    if (!isReactive(filing)) { filing = reactive(filing) }
+    this.filings[year] = filing;
+    console.log(this.filings)
   }
 
   getTaxInfo(year, region, status, capitalGains = null) {

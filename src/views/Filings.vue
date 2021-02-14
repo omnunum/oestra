@@ -9,7 +9,11 @@
         <div class="col"><span>Status</span></div>
     </div>
     <div v-for="(filing, year) in p.filings" :key="year">
-        <Filing v-model="p.filings[year]" :year=+year />
+        <Filing 
+            :modelValue="filing" 
+            @update:modelValue="p.updateFiling(+year, $event)" 
+            :year=+year 
+        />
     </div>
     <button id="filings-button-add-future-year" @click="addYear(futureYear)">Add filing for {{ futureYear }}</button>
   </div>
@@ -35,7 +39,15 @@ export default {
   },
   methods: {
     addYear(year) {
-      this.p.updateFiling(+year)
+      // use the previous years filing info if it exists
+      const prevFiling = this.p.filings[year - 1];
+      if (prevFiling !== undefined) {
+          var f = {
+              filingState: prevFiling.filingState,
+              filingStatus: prevFiling.filingStatus
+          };
+      }
+      this.p.updateFiling(+year, f || {});
     }
   }
 }
