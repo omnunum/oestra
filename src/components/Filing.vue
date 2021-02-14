@@ -1,5 +1,5 @@
-<template id="filing">
-  <div class="row">
+<template id="template-filing">
+  <div class="row" id="container-filing">
     <div class="col"><span>{{year}}</span> </div>
     <div class="col"><input v-model.number="filing.grossIncome" /> </div>
     <div class="col"><input v-model.number="filing.withholdings" /> </div>
@@ -32,7 +32,6 @@ export default {
   data() { return { 
     filing: this.modelValue,
   }},
-  inject: ['p'],
   components: {
     SelectMapped
   },

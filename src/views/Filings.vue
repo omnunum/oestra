@@ -1,5 +1,5 @@
-<template>
-  <div id="filings">
+<template id="template-filings">
+  <div id="container-filings">
     <button id="filings-button-add-future-year" @click="addYear(pastYear)">Add filing for {{ pastYear}}</button>
     <div class="row">
         <div class="col"><span>Year</span></div>
@@ -41,13 +41,14 @@ export default {
     addYear(year) {
       // use the previous years filing info if it exists
       const prevFiling = this.p.filings[year - 1];
+      var f = {};
       if (prevFiling !== undefined) {
-          var f = {
-              filingState: prevFiling.filingState,
-              filingStatus: prevFiling.filingStatus
-          };
+        f = {
+          filingState: prevFiling.filingState,
+          filingStatus: prevFiling.filingStatus
+        };
       }
-      this.p.updateFiling(+year, f || {});
+      this.p.updateFiling(+year, f);
     }
   }
 }
