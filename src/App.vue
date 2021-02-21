@@ -7,7 +7,7 @@
 </template>
 
 <script>
-import { Portfolio } from '@/js/portfolio'
+import { Portfolio } from './js/portfolio'
 var p = new Portfolio();
 const filings = {
     2019: {
